@@ -3,7 +3,7 @@ name: Deploy Gateway
 on:
   push:
     branches:
-      - feat/cicd  # 필요 시 'main'으로 변경
+      - main  # 필요 시 'main'으로 변경
   workflow_dispatch:
 
 env:
