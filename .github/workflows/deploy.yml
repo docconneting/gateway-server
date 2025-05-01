@@ -126,7 +126,7 @@ jobs:
       - name: Deploy to Gateway EC2
         run: |
           # 구성 파일 복사
-          scp -o StrictHostKeyChecking=no docker-compose.yml prod.yml gateway:/home/ubuntu/server/
+          scp -o StrictHostKeyChecking=no docker-compose.yml application-prod.yml gateway:/home/ubuntu/server/
 
           # EC2 접속 및 배포 실행
           ssh gateway <<EOF
