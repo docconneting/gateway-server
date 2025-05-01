@@ -73,7 +73,7 @@ jobs:
           EOF
 
           # application-prod.yml 생성
-          cat <<EOF > prod.yml
+          cat <<EOF > application-prod.yml
           server:
             port: 9000
 
