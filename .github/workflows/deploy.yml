@@ -134,7 +134,7 @@ jobs:
           # Gateway EC2에 SSH 접속 후 배포
           ssh gateway <<EOF
           cd ~/server
-
+      
           # Docker 설치 확인
           if ! command -v docker &> /dev/null; then
           echo "Installing Docker..."
@@ -153,10 +153,10 @@ jobs:
           -o /usr/local/lib/docker/cli-plugins/docker-compose
           sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
           fi
-        
+          
           # ECR 로그인
           aws ecr get-login-password --region ap-northeast-2 | \
-          docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          sudo docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
         
           # 최신 이미지로 재배포
           docker compose down --remove-orphans
