@@ -1,0 +1,156 @@
+name: Deploy Gateway
+
+on:
+  push:
+    branches:
+      - feat/cicd  # 이 브랜치에 push될 때마다 작동
+  workflow_dispatch:  # 수동 실행도 가능하게
+
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: gateway-service
+  IMAGE_TAG: latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. GitHub 리포지토리 코드 가져오기
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Java 17 설치 (Gradle 빌드용)
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 3. Gradle로 bootJar 빌드 (테스트는 생략)
+      - name: Build with Gradle
+        run: ./gradlew clean bootJar -x test
+
+      # 4. AWS 자격 증명 설정 (ECR 접근을 위해 필요)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 5. ECR 로그인 (레지스트리에 도커 이미지 푸시하기 위해 필요)
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 6. Docker 이미지 빌드 및 ECR에 푸시
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      # 7. SSH 접속 설정 및 prod.yml 파일 준비
+      - name: Prepare SSH and config
+        run: |
+          # SSH 키 설정
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DOCCONNETING_SSH_KEY }}" | base64 --decode > ~/.ssh/docconneting.pem
+          chmod 600 ~/.ssh/docconneting.pem
+
+          # Bastion → Gateway로 프록시 점프 설정
+          cat <<EOF > ~/.ssh/config
+          Host bastion
+            HostName ${{ secrets.BASTION_HOST }}
+            User ubuntu
+            IdentityFile ~/.ssh/docconneting.pem
+            StrictHostKeyChecking no
+
+          Host gateway
+            HostName ${{ secrets.GATEWAY_PRIVATE_IP }}
+            User ubuntu
+            IdentityFile ~/.ssh/docconneting.pem
+            ProxyJump bastion
+            StrictHostKeyChecking no
+          EOF
+
+          # application-prod.yml (내부 Eureka 주소 포함) 생성
+          cat <<EOF > prod.yml
+          server:
+            port: 9000
+
+          spring:
+            application:
+              name: api-gateway
+
+            cloud:
+              gateway:
+                routes:
+                  - id: alarm-service
+                    uri: lb://alarm-service
+                    predicates:
+                      - Path=/api/v1/notifications/**
+                  - id: main-service
+                    uri: lb://main-service
+                    predicates:
+                      - Path=/api/v1/**
+
+          eureka:
+            client:
+              register-with-eureka: true
+              fetch-registry: true
+              service-url:
+                defaultZone: http://10.0.1.28:8761/eureka
+
+          management:
+            endpoints:
+              web:
+                exposure:
+                  include: gateway
+          EOF
+
+          # docker-compose.yml 생성 (컨테이너 내에서 prod 프로필 실행)
+          cat <<EOF > docker-compose.yml
+          services:
+            gateway:
+              image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+              container_name: gateway
+              restart: always
+              ports:
+                - "9000:9000"
+              volumes:
+                - ./prod.yml:/app/config/application-prod.yml
+              command: >
+                java -jar -Dspring.profiles.active=prod /app.jar
+          EOF
+
+      # 8. Gateway EC2로 배포 실행
+      - name: Deploy to Gateway EC2 via Bastion
+        run: |
+          # 생성한 구성 파일을 Gateway EC2로 복사
+          scp -o StrictHostKeyChecking=no docker-compose.yml prod.yml gateway:/home/ubuntu/server/
+
+          # Gateway EC2에 SSH 접속 후 배포
+          ssh gateway <<EOF
+            cd ~/server
+
+            # Docker Compose V2가 없으면 설치
+            if ! docker compose version &> /dev/null; then
+              echo "Installing Docker Compose V2..."
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins
+              sudo curl -SL https://github.com/docker/compose/releases/download/v2.24.2/docker-compose-linux-x86_64 \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose
+              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            fi
+
+            # ECR 로그인 (IAM 역할 필요)
+            aws ecr get-login-password --region ap-northeast-2 | \
+              docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            # 기존 컨테이너 종료 후 최신 이미지로 재시작
+            docker compose down --remove-orphans
+            docker compose pull
+            docker system prune -af
+            docker compose up -d
+          EOF
