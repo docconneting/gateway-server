@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.time.LocalDateTime;
 
 @RestController
-@RequestMapping
+@RequestMapping("/actuator/health")
 public class HealthCheck {
 
     @GetMapping
